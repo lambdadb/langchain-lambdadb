@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import uuid
+from collections.abc import Iterable
 from typing import (
     Any,
     Callable,
@@ -16,11 +16,11 @@ from typing import (
     TypeVar,
 )
 
+from lambdadb import LambdaDB
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore
 from langchain_core.vectorstores.utils import _cosine_similarity as cosine_similarity
-from lambdadb import LambdaDB
 
 VST = TypeVar("VST", bound=VectorStore)
 
@@ -37,18 +37,19 @@ class LambdaDBVectorStore(VectorStore):
             pip install -U langchain-lambdadb
 
     Key init args — indexing params:
+        project_name: str
+            Name of the project.
         collection_name: str
             Name of the collection.
         embedding_function: Embeddings
             Embedding function to use.
 
     Key init args — client params:
-        client: Optional[Client]
+        client: LambdaDB
             Client to use.
-        connection_args: Optional[dict]
-            Connection arguments.
+        base_url: str
+            Base URL of the LambdaDB endpoint.
 
-    # TODO: Replace with relevant init params.
     Instantiate:
         .. code-block:: python
 
@@ -56,13 +57,14 @@ class LambdaDBVectorStore(VectorStore):
             from langchain_openai import OpenAIEmbeddings
 
             vector_store = LambdaDBVectorStore(
-                collection_name="foo",
+                project_name="foo"
+                collection_name="bar",
                 embedding_function=OpenAIEmbeddings(),
-                connection_args={"uri": "./foo.db"},
+                client=LambdaDB(project_api_key=<project_api_key>),
+                base_url="https://api.lambdadb.ai"
                 # other params...
             )
 
-    # TODO: Populate with relevant variables.
     Add Documents:
         .. code-block:: python
 
@@ -76,13 +78,11 @@ class LambdaDBVectorStore(VectorStore):
             ids = ["1", "2", "3"]
             vector_store.add_documents(documents=documents, ids=ids)
 
-    # TODO: Populate with relevant variables.
     Delete Documents:
         .. code-block:: python
 
             vector_store.delete(ids=["3"])
 
-    # TODO: Fill out with relevant variables and example output.
     Search:
         .. code-block:: python
 
@@ -92,21 +92,19 @@ class LambdaDBVectorStore(VectorStore):
 
         .. code-block:: python
 
-            # TODO: Example output
+            * thud [{'baz': 'bar'}]
 
-    # TODO: Fill out with relevant variables and example output.
     Search with filter:
         .. code-block:: python
 
-            results = vector_store.similarity_search(query="thud",k=1,filter={"bar": "baz"})
+            results = vector_store.similarity_search(query="thud",k=1,filter={"queryString":{"query":"baz:bar"}})
             for doc in results:
                 print(f"* {doc.page_content} [{doc.metadata}]")
 
         .. code-block:: python
 
-            # TODO: Example output
+            * thud [{'baz': 'bar'}]
 
-    # TODO: Fill out with relevant variables and example output.
     Search with score:
         .. code-block:: python
 
@@ -116,7 +114,7 @@ class LambdaDBVectorStore(VectorStore):
 
         .. code-block:: python
 
-            # TODO: Example output
+            * [SIM=0.000000] qux [{'bar': 'baz', 'baz': 'bar'}]
 
     # TODO: Fill out with relevant variables and example output.
     Async:
@@ -159,8 +157,12 @@ class LambdaDBVectorStore(VectorStore):
     def __init__(
             self,
             client: LambdaDB,
+            base_url: str,
+            project_name: str,
             collection_name: str,
-            embedding: Embeddings) -> None:
+            embedding: Embeddings,
+            text_field: str = "text",
+            vector_field: str = "vector") -> None:
         """Initialize with the given embedding function.
 
         Args:
@@ -168,9 +170,10 @@ class LambdaDBVectorStore(VectorStore):
             collection_name: Collection name.
             embedding: embedding function to use.
         """
-        if not isinstance(client, LambdaDB):
+        if client is None or not isinstance(client, LambdaDB):
             raise ValueError(
-                f"client should be an instance of lambdadb.LambdaDB, "
+                f"client value can't be None "
+                f"and should be an instance of lambdadb.LambdaDB, "
                 f"got {type(client)}"
             )
         
@@ -179,21 +182,31 @@ class LambdaDBVectorStore(VectorStore):
                 "`embedding` value can't be None. Pass `Embeddings` instance."
             )
         
-
-        self._database: dict[str, dict[str, Any]] = {}
         self._client = client
+        self._base_url = base_url
+        self._project_name = project_name
         self._collection_name = collection_name
         self.embedding = embedding
+        self._text_field = text_field
+        self._vector_field = vector_field
 
     @classmethod
     def from_texts(
         cls: Type[LambdaDBVectorStore],
         texts: List[str],
+        client: LambdaDB,
+        base_url: str,
+        project_name: str,
+        collection_name: str,
         embedding: Embeddings,
         metadatas: Optional[List[dict]] = None,
         **kwargs: Any,
     ) -> LambdaDBVectorStore:
         store = cls(
+            client=client,
+            base_url=base_url,
+            project_name=project_name,
+            collection_name=collection_name,
             embedding=embedding,
         )
         store.add_texts(texts=texts, metadatas=metadatas, **kwargs)
@@ -222,6 +235,7 @@ class LambdaDBVectorStore(VectorStore):
         Returns:
             List of ids from adding the texts into the vectorstore.
         """
+        texts = list(texts)
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in texts]
         else:
@@ -233,13 +247,6 @@ class LambdaDBVectorStore(VectorStore):
                 raise ValueError(msg)
         
             ids = [id if id is not None else str(uuid.uuid4()) for id in ids]
-        
-        if metadatas and len(metadatas) != len(texts):
-            msg = (
-                    f"metadatas must be the same length as texts. "
-                    f"Got {len(metadatas)} metadatas and {len(texts)} texts."
-                )
-            raise ValueError(msg)
 
         vectors = self.embedding.embed_documents(texts)
 
@@ -250,22 +257,29 @@ class LambdaDBVectorStore(VectorStore):
         doc_ids = []
         
         for idx, text in enumerate(texts):
-            doc_id = ids[idx]
-            doc_ids.append(doc_id)
-            vector = vectors[idx]
-            doc = {
-                "id": doc_id,
-                "vector": vector,
-            }
-            docs.append(doc)
+            metadata = metadatas[idx] if metadatas else {}
+            doc_ids.append(ids[idx])
+            docs.append(
+                {
+                    "id": ids[idx],
+                    self._text_field: text,
+                    self._vector_field: vectors[idx],
+                    "metadata": metadata,
+                }
+            )
             docs_count += 1
 
             if docs_count == batch_size:
-                res = self._client.collections.docs.upsert(
-                    project_name="",
-                    collection_name=self._collection_name,
-                    docs=docs
-                )
+                try:
+                    self._client.collections.docs.upsert(
+                        project_name=self._project_name,
+                        collection_name=self._collection_name,
+                        docs=docs,
+                        server_url=self._base_url
+                    )
+                except Exception as e:
+                    raise(e)
+
                 added_ids.extend(doc_ids)
                 docs_count = 0
                 doc_ids.clear()
@@ -284,10 +298,24 @@ class LambdaDBVectorStore(VectorStore):
 
     def delete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> None:
         if ids:
-            for _id in ids:
-                self._database.pop(_id, None)
+            try:
+                self._client.collections.docs.delete(
+                    project_name=self._project_name,
+                    collection_name=self._collection_name,
+                    ids=ids,
+                    server_url=self._base_url
+                )
+            except Exception as e:
+                raise(e)
 
-    def get_by_ids(self, ids: Sequence[str], /) -> list[Document]:
+    def _build_langchain_document(self, doc: dict) -> Document:
+        return Document(
+            id=doc["id"],
+            page_content=doc[self._text_field],
+            metadata=doc["metadata"],
+        )
+
+    def get_by_ids(self, ids: Sequence[str], /, consistent_read: bool = False) -> list[Document]:
         """Get documents by their ids.
 
         Args:
@@ -296,111 +324,108 @@ class LambdaDBVectorStore(VectorStore):
         Returns:
             A list of Document objects.
         """
-        documents = []
+        langchain_docs = []
 
-        for doc_id in ids:
-            doc = self._database.get(doc_id)
-            if doc:
-                documents.append(
-                    Document(
-                        id=doc["id"],
-                        page_content=doc["text"],
-                        metadata=doc["metadata"],
-                    )
-                )
-        return documents
+        fetched_docs = self._client.collections.docs.fetch(
+            project_name=self._project_name,
+            collection_name=self._collection_name,
+            ids=list(ids),
+            consistent_read=consistent_read,
+            server_url=self._base_url
+        ).docs
 
-    # NOTE: the below helper method implements similarity search for in-memory
-    # storage. It is optional and not a part of the vector store interface.
+        for doc in fetched_docs:
+            langchain_docs.append(
+                self._build_langchain_document(doc.doc)
+            )
+
+        return langchain_docs
+
     def _similarity_search_with_score_by_vector(
         self,
         embedding: List[float],
         k: int = 4,
-        filter: Optional[Callable[[Document], bool]] = None,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: bool = False,
         **kwargs: Any,
-    ) -> List[tuple[Document, float, List[float]]]:
-        # get all docs with fixed order in list
-        docs = list(self._database.values())
+    ) -> List[tuple[Document, float, List[float]]]:        
 
-        if filter is not None:
-            docs = [
-                doc
-                for doc in docs
-                if filter(Document(page_content=doc["text"], metadata=doc["metadata"]))
-            ]
+        query = {
+            "query": {
+                self._vector_field: embedding,
+                "k": k,
+                "filter": filter
+            }
+        }
+
+        docs = self._client.collections.query(
+            project_name=self._project_name,
+            collection_name=self._collection_name,
+            size=k,
+            query=query,
+            consistent_read=consistent_read,
+            server_url=self._base_url
+        ).docs
 
         if not docs:
             return []
 
-        similarity = cosine_similarity([embedding], [doc["vector"] for doc in docs])[0]
-
-        # get the indices ordered by similarity score
-        top_k_idx = similarity.argsort()[::-1][:k]
-
-        return [
-            (
-                # Document
-                Document(
-                    id=doc_dict["id"],
-                    page_content=doc_dict["text"],
-                    metadata=doc_dict["metadata"],
-                ),
-                # Score
-                float(similarity[idx].item()),
-                # Embedding vector
-                doc_dict["vector"],
+        langchain_docs = []
+        for doc in docs:
+            langchain_docs.append(
+                self._build_langchain_document(doc.doc)
             )
-            for idx in top_k_idx
-            # Assign using walrus operator to avoid multiple lookups
-            if (doc_dict := docs[idx])
-        ]
+
+        return langchain_docs
 
     def similarity_search(
-        self, query: str, k: int = 4, **kwargs: Any
+        self, query: str, k: int = 4, filter: Optional[dict[str, Any]] = None,
+        consistent_read: bool = False, **kwargs: Any
     ) -> List[Document]:
         embedding = self.embedding.embed_query(query)
         return [
             doc
             for doc, _, _ in self._similarity_search_with_score_by_vector(
-                embedding=embedding, k=k, **kwargs
+                embedding=embedding, k=k, consistent_read=consistent_read, **kwargs
             )
         ]
 
     def similarity_search_with_score(
-        self, query: str, k: int = 4, **kwargs: Any
+        self, query: str, k: int = 4, filter: Optional[dict[str, Any]] = None,
+        consistent_read: bool = False, **kwargs: Any
     ) -> List[Tuple[Document, float]]:
         embedding = self.embedding.embed_query(query)
         return [
             (doc, similarity)
             for doc, similarity, _ in self._similarity_search_with_score_by_vector(
-                embedding=embedding, k=k, **kwargs
+                embedding=embedding, k=k, consistent_read=consistent_read, **kwargs
             )
         ]
 
     ### ADDITIONAL OPTIONAL SEARCH METHODS BELOW ###
 
-    # def similarity_search_by_vector(
-    #     self, embedding: List[float], k: int = 4, **kwargs: Any
-    # ) -> List[Document]:
-    #     raise NotImplementedError
+    def similarity_search_by_vector(
+        self, embedding: List[float], k: int = 4, **kwargs: Any
+    ) -> List[Document]:
+        raise NotImplementedError
 
-    # def max_marginal_relevance_search(
-    #     self,
-    #     query: str,
-    #     k: int = 4,
-    #     fetch_k: int = 20,
-    #     lambda_mult: float = 0.5,
-    #     **kwargs: Any,
-    # ) -> List[Document]:
-    #     raise NotImplementedError
+    def max_marginal_relevance_search(
+        self,
+        query: str,
+        k: int = 4,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        **kwargs: Any,
+    ) -> List[Document]:
+        raise NotImplementedError
 
-    # def max_marginal_relevance_search_by_vector(
-    #     self,
-    #     embedding: List[float],
-    #     k: int = 4,
-    #     fetch_k: int = 20,
-    #     lambda_mult: float = 0.5,
-    #     **kwargs: Any,
-    # ) -> List[Document]:
-    #     raise NotImplementedError
+    def max_marginal_relevance_search_by_vector(
+        self,
+        embedding: List[float],
+        k: int = 4,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        **kwargs: Any,
+    ) -> List[Document]:
+        raise NotImplementedError
 
