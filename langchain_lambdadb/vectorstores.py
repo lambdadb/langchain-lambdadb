@@ -6,8 +6,6 @@ import uuid
 from collections.abc import Iterable
 from typing import (
     Any,
-    Callable,
-    Iterator,
     List,
     Optional,
     Sequence,
@@ -37,8 +35,6 @@ class LambdaDBVectorStore(VectorStore):
             pip install -U langchain-lambdadb
 
     Key init args — indexing params:
-        project_name: str
-            Name of the project.
         collection_name: str
             Name of the collection.
         embedding_function: Embeddings
@@ -47,8 +43,6 @@ class LambdaDBVectorStore(VectorStore):
     Key init args — client params:
         client: LambdaDB
             Client to use.
-        base_url: str
-            Base URL of the LambdaDB endpoint.
 
     Instantiate:
         .. code-block:: python
@@ -57,11 +51,9 @@ class LambdaDBVectorStore(VectorStore):
             from langchain_openai import OpenAIEmbeddings
 
             vector_store = LambdaDBVectorStore(
-                project_name="foo"
                 collection_name="bar",
                 embedding_function=OpenAIEmbeddings(),
-                client=LambdaDB(project_api_key=<project_api_key>),
-                base_url="https://api.lambdadb.ai"
+                client=LambdaDB(base_url="https://api.lambdadb.ai/projects/<project_id>", project_api_key=<project_api_key>),
                 # other params...
             )
 
@@ -157,8 +149,6 @@ class LambdaDBVectorStore(VectorStore):
     def __init__(
             self,
             client: LambdaDB,
-            base_url: str,
-            project_name: str,
             collection_name: str,
             embedding: Embeddings,
             text_field: str = "text",
@@ -181,10 +171,8 @@ class LambdaDBVectorStore(VectorStore):
             raise ValueError(
                 "`embedding` value can't be None. Pass `Embeddings` instance."
             )
-        
+
         self._client = client
-        self._base_url = base_url
-        self._project_name = project_name
         self._collection_name = collection_name
         self.embedding = embedding
         self._text_field = text_field
@@ -195,8 +183,6 @@ class LambdaDBVectorStore(VectorStore):
         cls: Type[LambdaDBVectorStore],
         texts: List[str],
         client: LambdaDB,
-        base_url: str,
-        project_name: str,
         collection_name: str,
         embedding: Embeddings,
         metadatas: Optional[List[dict]] = None,
@@ -204,8 +190,6 @@ class LambdaDBVectorStore(VectorStore):
     ) -> LambdaDBVectorStore:
         store = cls(
             client=client,
-            base_url=base_url,
-            project_name=project_name,
             collection_name=collection_name,
             embedding=embedding,
         )
@@ -272,10 +256,8 @@ class LambdaDBVectorStore(VectorStore):
             if docs_count == batch_size:
                 try:
                     self._client.collections.docs.upsert(
-                        project_name=self._project_name,
                         collection_name=self._collection_name,
                         docs=docs,
-                        server_url=self._base_url
                     )
                 except Exception as e:
                     raise(e)
@@ -300,10 +282,8 @@ class LambdaDBVectorStore(VectorStore):
         if ids:
             try:
                 self._client.collections.docs.delete(
-                    project_name=self._project_name,
                     collection_name=self._collection_name,
                     ids=ids,
-                    server_url=self._base_url
                 )
             except Exception as e:
                 raise(e)
@@ -327,11 +307,9 @@ class LambdaDBVectorStore(VectorStore):
         langchain_docs = []
 
         fetched_docs = self._client.collections.docs.fetch(
-            project_name=self._project_name,
             collection_name=self._collection_name,
             ids=list(ids),
             consistent_read=consistent_read,
-            server_url=self._base_url
         ).docs
 
         for doc in fetched_docs:
@@ -359,12 +337,10 @@ class LambdaDBVectorStore(VectorStore):
         }
 
         docs = self._client.collections.query(
-            project_name=self._project_name,
             collection_name=self._collection_name,
             size=k,
             query=query,
             consistent_read=consistent_read,
-            server_url=self._base_url
         ).docs
 
         if not docs:
