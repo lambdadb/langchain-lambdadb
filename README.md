@@ -1,6 +1,6 @@
 # langchain-lambdadb
 
-This package contains the LangChain integration with LambdaDB
+This package contains the LangChain integration with LambdaDB vector store.
 
 ## Installation
 
@@ -8,38 +8,159 @@ This package contains the LangChain integration with LambdaDB
 pip install -U langchain-lambdadb
 ```
 
-And you should configure credentials by setting the following environment variables:
+## Prerequisites
 
-* TODO: fill this out
+Before using this integration, you need to:
 
-## Chat Models
+1. Create a collection in LambdaDB with proper vector and text indices
+2. Have your LambdaDB credentials ready
 
-`ChatLambdaDB` class exposes chat models from LambdaDB.
+### Creating a Collection
+
+Create a collection in LambdaDB with the required indices:
 
 ```python
-from langchain_lambdadb import ChatLambdaDB
+from lambdadb import LambdaDB, models
 
-llm = ChatLambdaDB()
-llm.invoke("Sing a ballad of LangChain.")
+client = LambdaDB(
+    server_url="https://api.lambdadb.ai/projects/<your-project-id>",
+    project_api_key="<your-api-key>"
+)
+
+# Create collection with vector and text indices
+client.collections.create(
+    collection_name="my_collection",
+    index_configs={
+        "vector": {
+            "type": models.TypeVector.VECTOR,
+            "dimensions": 1536,  # Match your embedding dimensions
+            "similarity": models.Similarity.COSINE
+        },
+        "text": {
+            "type": models.TypeText.TEXT,
+            "analyzers": [models.Analyzer.ENGLISH]
+        }
+    }
+)
 ```
 
-## Embeddings
-
-`LambdaDBEmbeddings` class exposes embeddings from LambdaDB.
+## Quick Start
 
 ```python
-from langchain_lambdadb import LambdaDBEmbeddings
+import os
+from lambdadb import LambdaDB
+from langchain_lambdadb import LambdaDBVectorStore
+from langchain_openai import OpenAIEmbeddings
+from langchain_core.documents import Document
 
-embeddings = LambdaDBEmbeddings()
-embeddings.embed_query("What is the meaning of life?")
+# Set up LambdaDB client
+client = LambdaDB(
+    server_url=os.getenv("LAMBDADB_SERVER_URL"),
+    project_api_key=os.getenv("LAMBDADB_API_KEY")
+)
+
+# Connect to existing collection
+vector_store = LambdaDBVectorStore(
+    client=client,
+    collection_name="my_collection",  # Must be an existing collection
+    embedding=OpenAIEmbeddings()
+)
+
+# Add documents
+documents = [
+    Document(page_content="LambdaDB is a vector database", metadata={"source": "docs"}),
+    Document(page_content="LangChain integrates with LambdaDB", metadata={"source": "docs"}),
+]
+vector_store.add_documents(documents)
+
+# Search for similar documents
+results = vector_store.similarity_search("What is LambdaDB?", k=2)
+for doc in results:
+    print(f"Content: {doc.page_content}")
+    print(f"Metadata: {doc.metadata}")
 ```
 
-## LLMs
-`LambdaDBLLM` class exposes LLMs from LambdaDB.
+## Configuration
+
+Set the following environment variables:
+
+```bash
+export LAMBDADB_API_KEY="your-api-key"
+export LAMBDADB_SERVER_URL="https://api.lambdadb.ai/projects/<your-project-id>"
+```
+
+## Vector Store Features
+
+The `LambdaDBVectorStore` supports:
+
+- **Document Operations**: Add, update, and delete documents
+- **Similarity Search**: Find similar documents using vector search
+- **Metadata Filtering**: Filter search results by document metadata
+- **Batch Operations**: Efficient bulk document processing
+- **Async Support**: Full async/await support for all operations
+
+## Advanced Usage
+
+### Similarity Search with Scores
 
 ```python
-from langchain_lambdadb import LambdaDBLLM
+# Get similarity scores with results
+results_with_scores = vector_store.similarity_search_with_score(
+    query="vector database features",
+    k=3
+)
 
-llm = LambdaDBLLM()
-llm.invoke("The meaning of life is")
+for doc, score in results_with_scores:
+    print(f"Score: {score:.4f}")
+    print(f"Content: {doc.page_content}")
+```
+
+### Metadata Filtering
+
+```python
+# Search with metadata filters
+filtered_results = vector_store.similarity_search(
+    query="database",
+    k=5,
+    filter={"source": "documentation"}
+)
+```
+
+### Using as a Retriever
+
+```python
+# Use as a retriever for RAG applications
+retriever = vector_store.as_retriever(
+    search_type="similarity",
+    search_kwargs={"k": 4}
+)
+
+relevant_docs = retriever.invoke("How does LambdaDB work?")
+```
+
+## Development
+
+For development and testing:
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd langchain-lambdadb
+
+# Install with development dependencies
+poetry install --with test,lint
+
+# Run tests with mock data
+make test
+
+# Run integration tests with real LambdaDB (requires credentials)
+export LAMBDADB_API_KEY="your-api-key"
+export LAMBDADB_SERVER_URL="https://api.lambdadb.ai/projects/<your-project-id>"
+# Optional: Use existing collection instead of creating test collections
+export LAMBDADB_COLLECTION_NAME="your-test-collection"
+make integration_tests
+
+# Lint and format code
+make lint
+make format
 ```

@@ -16,6 +16,7 @@ test_watch:
 	poetry run ptw --snapshot-update --now . -- -vv $(TEST_FILE)
 
 # integration tests are run without the --disable-socket flag to allow network calls
+# Run sequentially to avoid timing issues with LambdaDB consistency
 integration_test integration_tests:
 	poetry run pytest $(TEST_FILE)
 

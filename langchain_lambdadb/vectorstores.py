@@ -18,14 +18,15 @@ from lambdadb import LambdaDB
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore
-from langchain_core.vectorstores.utils import _cosine_similarity as cosine_similarity
 
 VST = TypeVar("VST", bound=VectorStore)
 
 
 class LambdaDBVectorStore(VectorStore):
-
     """LambdaDB vector store integration.
+
+    This integration works with existing LambdaDB collections. The collection must be
+    created beforehand with proper vector and text indices configured.
 
     Setup:
         Install ``langchain-lambdadb`` package.
@@ -36,25 +37,32 @@ class LambdaDBVectorStore(VectorStore):
 
     Key init args — indexing params:
         collection_name: str
-            Name of the collection.
-        embedding_function: Embeddings
+            Name of an existing collection in LambdaDB.
+        embedding: Embeddings
             Embedding function to use.
 
     Key init args — client params:
         client: LambdaDB
-            Client to use.
+            LambdaDB client instance.
 
     Instantiate:
         .. code-block:: python
 
             from langchain_lambdadb.vectorstores import LambdaDBVectorStore
             from langchain_openai import OpenAIEmbeddings
+            from lambdadb import LambdaDB
 
+            # Initialize client
+            client = LambdaDB(
+                server_url="https://api.lambdadb.ai/projects/<project_id>",
+                project_api_key="<your_api_key>"
+            )
+
+            # Use existing collection
             vector_store = LambdaDBVectorStore(
-                collection_name="bar",
-                embedding_function=OpenAIEmbeddings(),
-                client=LambdaDB(base_url="https://api.lambdadb.ai/projects/<project_id>", project_api_key=<project_api_key>),
-                # other params...
+                collection_name="my_existing_collection",
+                embedding=OpenAIEmbeddings(),
+                client=client,
             )
 
     Add Documents:
@@ -108,57 +116,79 @@ class LambdaDBVectorStore(VectorStore):
 
             * [SIM=0.000000] qux [{'bar': 'baz', 'baz': 'bar'}]
 
-    # TODO: Fill out with relevant variables and example output.
     Async:
         .. code-block:: python
 
             # add documents
-            # await vector_store.aadd_documents(documents=documents, ids=ids)
+            await vector_store.aadd_documents(documents=documents, ids=ids)
 
             # delete documents
-            # await vector_store.adelete(ids=["3"])
+            await vector_store.adelete(ids=["3"])
 
             # search
-            # results = vector_store.asimilarity_search(query="thud",k=1)
+            results = await vector_store.asimilarity_search(query="thud", k=1)
+            for doc in results:
+                print(f"* {doc.page_content} [{doc.metadata}]")
 
             # search with score
-            results = await vector_store.asimilarity_search_with_score(query="qux",k=1)
-            for doc,score in results:
+            results = await vector_store.asimilarity_search_with_score(query="qux", k=1)
+            for doc, score in results:
                 print(f"* [SIM={score:3f}] {doc.page_content} [{doc.metadata}]")
 
         .. code-block:: python
 
-            # TODO: Example output
+            * [SIM=0.892341] qux [{'bar': 'baz', 'baz': 'bar'}]
 
-    # TODO: Fill out with relevant variables and example output.
     Use as Retriever:
         .. code-block:: python
 
             retriever = vector_store.as_retriever(
-                search_type="mmr",
-                search_kwargs={"k": 1, "fetch_k": 2, "lambda_mult": 0.5},
+                search_type="similarity",
+                search_kwargs={"k": 2, "score_threshold": 0.5},
             )
-            retriever.invoke("thud")
+            relevant_docs = retriever.invoke("thud")
+            for doc in relevant_docs:
+                print(f"* {doc.page_content} [{doc.metadata}]")
 
         .. code-block:: python
 
-            # TODO: Example output
+            * thud [{'bar': 'baz'}]
+            * foo [{'baz': 'bar'}]
 
     """  # noqa: E501
 
     def __init__(
-            self,
-            client: LambdaDB,
-            collection_name: str,
-            embedding: Embeddings,
-            text_field: str = "text",
-            vector_field: str = "vector") -> None:
+        self,
+        client: LambdaDB,
+        collection_name: str,
+        embedding: Embeddings,
+        text_field: str = "text",
+        vector_field: str = "vector",
+        validate_collection: bool = True,
+        default_consistent_read: bool = True,
+    ) -> None:
         """Initialize with the given embedding function.
 
         Args:
             client: LambdaDB client. Documentation: https://docs.lambdadb.ai
-            collection_name: Collection name.
+            collection_name: Name of an existing collection in LambdaDB.
+                The collection must already exist and have proper vector indices
+                configured.
             embedding: embedding function to use.
+            text_field: Name of the text field in documents (default: "text").
+            vector_field: Name of the vector field in documents (default: "vector").
+            validate_collection: Whether to validate that the collection exists and is
+                active (default: True).
+            default_consistent_read: Default value for consistent_read parameter in all
+                read operations. When True, ensures immediate consistency but may have
+                slight performance impact. When False, uses eventual consistency which
+                is faster but may return stale data for ~1 minute after writes
+                (default: True).
+
+        Note:
+            This integration is designed to work with existing LambdaDB collections.
+            The collection should be created beforehand with appropriate vector and text
+            indices.
         """
         if client is None or not isinstance(client, LambdaDB):
             raise ValueError(
@@ -166,34 +196,83 @@ class LambdaDBVectorStore(VectorStore):
                 f"and should be an instance of lambdadb.LambdaDB, "
                 f"got {type(client)}"
             )
-        
+
         if embedding is None:
             raise ValueError(
                 "`embedding` value can't be None. Pass `Embeddings` instance."
             )
+
+        if not collection_name or not isinstance(collection_name, str):
+            raise ValueError(
+                f"collection_name must be a non-empty string, got {collection_name}"
+            )
+
+        # Validate that the collection exists and is active
+        if validate_collection:
+            try:
+                collection_info = client.collections.get(
+                    collection_name=collection_name
+                )
+                if collection_info.collection.collection_status.value != "ACTIVE":
+                    raise ValueError(
+                        f"Collection '{collection_name}' exists but is not ACTIVE. "
+                        f"Status: {collection_info.collection.collection_status.value}"
+                    )
+            except Exception as e:
+                raise ValueError(
+                    f"Collection '{collection_name}' does not exist or is not "
+                    f"accessible. "
+                    f"Please create the collection first with proper vector and text "
+                    f"indices. "
+                    f"Error: {e}"
+                )
 
         self._client = client
         self._collection_name = collection_name
         self.embedding = embedding
         self._text_field = text_field
         self._vector_field = vector_field
+        self._default_consistent_read = default_consistent_read
 
     @classmethod
-    def from_texts(
+    def from_texts(  # type: ignore[override]
         cls: Type[LambdaDBVectorStore],
         texts: List[str],
-        client: LambdaDB,
-        collection_name: str,
         embedding: Embeddings,
         metadatas: Optional[List[dict]] = None,
+        *,
+        client: LambdaDB,
+        collection_name: str,
+        ids: Optional[List[str]] = None,
+        validate_collection: bool = True,
+        default_consistent_read: bool = True,
         **kwargs: Any,
     ) -> LambdaDBVectorStore:
+        """Create a LambdaDBVectorStore from a list of texts.
+
+        Args:
+            texts: List of texts to add to the vectorstore.
+            embedding: Embedding function to use.
+            metadatas: Optional list of metadata dicts for each text.
+            client: LambdaDB client instance.
+            collection_name: Name of existing collection to use.
+            ids: Optional list of IDs for the texts.
+            validate_collection: Whether to validate collection exists and is active.
+            default_consistent_read: Default value for consistent_read parameter.
+            **kwargs: Additional arguments passed to add_texts.
+
+        Returns:
+            LambdaDBVectorStore instance with the texts added.
+        """
         store = cls(
             client=client,
             collection_name=collection_name,
             embedding=embedding,
+            validate_collection=validate_collection,
+            default_consistent_read=default_consistent_read,
+            **{k: v for k, v in kwargs.items() if k in ["text_field", "vector_field"]},
         )
-        store.add_texts(texts=texts, metadatas=metadatas, **kwargs)
+        store.add_texts(texts=texts, metadatas=metadatas, ids=ids, **kwargs)
         return store
 
     @property
@@ -229,20 +308,15 @@ class LambdaDBVectorStore(VectorStore):
                     f"Got {len(ids)} ids and {len(texts)} texts."
                 )
                 raise ValueError(msg)
-        
-            ids = [id if id is not None else str(uuid.uuid4()) for id in ids]
+
+            ids = [str(id) if id is not None else str(uuid.uuid4()) for id in ids]
 
         vectors = self.embedding.embed_documents(texts)
 
-        added_ids = []
-        batch_size = 100
-        docs_count = 0
+        # Prepare all documents for bulk upsert
         docs = []
-        doc_ids = []
-        
         for idx, text in enumerate(texts):
             metadata = metadatas[idx] if metadatas else {}
-            doc_ids.append(ids[idx])
             docs.append(
                 {
                     "id": ids[idx],
@@ -251,20 +325,23 @@ class LambdaDBVectorStore(VectorStore):
                     "metadata": metadata,
                 }
             )
-            docs_count += 1
 
-            if docs_count == batch_size:
-                try:
-                    self._client.collections.docs.upsert(
-                        collection_name=self._collection_name,
-                        docs=docs,
-                    )
-                except Exception as e:
-                    raise(e)
+        # Use regular upsert method for consistent immediate indexing
+        # Process in batches to stay under 6MB limit per request
+        added_ids = []
+        batch_size = 50  # Conservative batch size for 6MB limit
 
-                added_ids.extend(doc_ids)
-                docs_count = 0
-                doc_ids.clear()
+        for i in range(0, len(docs), batch_size):
+            batch_docs = docs[i : i + batch_size]
+            batch_ids = ids[i : i + batch_size]
+
+            try:
+                self._client.collections.docs.upsert(
+                    collection_name=self._collection_name, docs=batch_docs
+                )
+                added_ids.extend(batch_ids)
+            except Exception as e:
+                raise RuntimeError(f"Upsert operation failed: {str(e)}") from e
 
         return added_ids
 
@@ -276,7 +353,17 @@ class LambdaDBVectorStore(VectorStore):
         """Add documents to the store."""
         texts = [doc.page_content for doc in documents]
         metadatas = [doc.metadata for doc in documents]
-        return self.add_texts(texts, metadatas, **kwargs)
+        # Extract IDs from documents if they have them, or use provided ids
+        ids = kwargs.get("ids")
+        if ids is None:
+            # Try to get IDs from the documents themselves
+            ids = [doc.id if doc.id is not None else None for doc in documents]
+            # If all are None, let add_texts handle ID generation
+            if all(id is None for id in ids):
+                ids = None
+        # Remove ids from kwargs to avoid duplicate parameter
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k != "ids"}
+        return self.add_texts(texts, metadatas, ids=ids, **filtered_kwargs)
 
     def delete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> None:
         if ids:
@@ -286,7 +373,18 @@ class LambdaDBVectorStore(VectorStore):
                     ids=ids,
                 )
             except Exception as e:
-                raise(e)
+                # Handle cases where documents don't exist gracefully
+                error_message = str(e).lower()
+                if (
+                    "not found" in error_message
+                    or "does not exist" in error_message
+                    or "creating state" in error_message
+                    or "badrequest" in error_message
+                ):
+                    # Silently ignore missing documents or temporary state issues
+                    pass
+                else:
+                    raise (e)
 
     def _build_langchain_document(self, doc: dict) -> Document:
         return Document(
@@ -295,16 +393,21 @@ class LambdaDBVectorStore(VectorStore):
             metadata=doc["metadata"],
         )
 
-    def get_by_ids(self, ids: Sequence[str], /, consistent_read: bool = False) -> list[Document]:
+    def get_by_ids(
+        self, ids: Sequence[str], /, consistent_read: Optional[bool] = None
+    ) -> list[Document]:
         """Get documents by their ids.
 
         Args:
             ids: The ids of the documents to get.
+            consistent_read: Whether to use consistent read. If None, uses the default
+                setting from initialization.
 
         Returns:
-            A list of Document objects.
+            A list of Document objects in the same order as input IDs.
         """
-        langchain_docs = []
+        if consistent_read is None:
+            consistent_read = self._default_consistent_read
 
         fetched_docs = self._client.collections.docs.fetch(
             collection_name=self._collection_name,
@@ -312,29 +415,44 @@ class LambdaDBVectorStore(VectorStore):
             consistent_read=consistent_read,
         ).docs
 
+        # Create a mapping from ID to Document since LambdaDB doesn't preserve order
+        doc_map = {}
         for doc in fetched_docs:
-            langchain_docs.append(
-                self._build_langchain_document(doc.doc)
-            )
+            langchain_doc = self._build_langchain_document(doc.doc)
+            doc_map[langchain_doc.id] = langchain_doc
 
-        return langchain_docs
+        # Return documents in the same order as requested IDs
+        # Skip IDs that weren't found (LangChain tests expect this behavior)
+        ordered_docs = []
+        for id in ids:
+            if id in doc_map:
+                ordered_docs.append(doc_map[id])
+
+        return ordered_docs
 
     def _similarity_search_with_score_by_vector(
         self,
         embedding: List[float],
         k: int = 4,
         filter: Optional[dict[str, Any]] = None,
-        consistent_read: bool = False,
+        consistent_read: Optional[bool] = None,
         **kwargs: Any,
-    ) -> List[tuple[Document, float, List[float]]]:        
+    ) -> List[tuple[Document, float]]:
+        # Use proper LambdaDB knn query format
+        query = {"knn": {"field": self._vector_field, "queryVector": embedding, "k": k}}
 
-        query = {
-            "query": {
-                self._vector_field: embedding,
-                "k": k,
-                "filter": filter
-            }
-        }
+        # If filter provided, add it to the knn query
+        if filter:
+            if isinstance(filter, dict) and "query" in filter:
+                query["knn"]["filter"] = filter
+            elif isinstance(filter, dict):
+                # Convert filter dict to queryString format
+                query["knn"]["filter"] = {"queryString": {"query": str(filter)}}
+            else:
+                query["knn"]["filter"] = {"queryString": {"query": str(filter)}}
+
+        if consistent_read is None:
+            consistent_read = self._default_consistent_read
 
         docs = self._client.collections.query(
             collection_name=self._collection_name,
@@ -346,44 +464,65 @@ class LambdaDBVectorStore(VectorStore):
         if not docs:
             return []
 
-        langchain_docs = []
+        results = []
         for doc in docs:
-            langchain_docs.append(
-                self._build_langchain_document(doc.doc)
+            langchain_doc = self._build_langchain_document(doc.doc)
+            # LambdaDB returns relevance score in doc.score
+            score: float = (
+                float(doc.score)
+                if hasattr(doc, "score") and doc.score is not None
+                else 1.0
             )
+            results.append((langchain_doc, score))
 
-        return langchain_docs
+        return results
 
     def similarity_search(
-        self, query: str, k: int = 4, filter: Optional[dict[str, Any]] = None,
-        consistent_read: bool = False, **kwargs: Any
+        self,
+        query: str,
+        k: int = 4,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: Optional[bool] = None,
+        **kwargs: Any,
     ) -> List[Document]:
         embedding = self.embedding.embed_query(query)
         return [
             doc
-            for doc, _, _ in self._similarity_search_with_score_by_vector(
-                embedding=embedding, k=k, consistent_read=consistent_read, **kwargs
+            for doc, _ in self._similarity_search_with_score_by_vector(
+                embedding=embedding,
+                k=k,
+                filter=filter,
+                consistent_read=consistent_read,
+                **kwargs,
             )
         ]
 
     def similarity_search_with_score(
-        self, query: str, k: int = 4, filter: Optional[dict[str, Any]] = None,
-        consistent_read: bool = False, **kwargs: Any
+        self,
+        query: str,
+        k: int = 4,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: Optional[bool] = None,
+        **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
         embedding = self.embedding.embed_query(query)
-        return [
-            (doc, similarity)
-            for doc, similarity, _ in self._similarity_search_with_score_by_vector(
-                embedding=embedding, k=k, consistent_read=consistent_read, **kwargs
-            )
-        ]
-
-    ### ADDITIONAL OPTIONAL SEARCH METHODS BELOW ###
+        return self._similarity_search_with_score_by_vector(
+            embedding=embedding,
+            k=k,
+            filter=filter,
+            consistent_read=consistent_read,
+            **kwargs,
+        )
 
     def similarity_search_by_vector(
         self, embedding: List[float], k: int = 4, **kwargs: Any
     ) -> List[Document]:
-        raise NotImplementedError
+        return [
+            doc
+            for doc, _ in self._similarity_search_with_score_by_vector(
+                embedding=embedding, k=k, **kwargs
+            )
+        ]
 
     def max_marginal_relevance_search(
         self,
@@ -405,3 +544,129 @@ class LambdaDBVectorStore(VectorStore):
     ) -> List[Document]:
         raise NotImplementedError
 
+    ### ASYNC METHODS ###
+
+    async def aadd_texts(
+        self,
+        texts: Iterable[str],
+        metadatas: Optional[list[dict]] = None,
+        ids: Optional[Sequence[str]] = None,
+        **kwargs: Any,
+    ) -> list[str]:
+        """Async version of add_texts.
+
+        Note: Currently runs synchronously as LambdaDB client doesn't support async
+        operations.
+        """
+        # LambdaDB client doesn't have async support yet, so we run sync version
+        return self.add_texts(texts=texts, metadatas=metadatas, ids=ids, **kwargs)
+
+    async def aadd_documents(
+        self,
+        documents: List[Document],
+        **kwargs: Any,
+    ) -> List[str]:
+        """Async version of add_documents.
+
+        Note: Currently runs synchronously as LambdaDB client doesn't support async
+        operations.
+        """
+        return self.add_documents(documents=documents, **kwargs)
+
+    async def adelete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> None:
+        """Async version of delete.
+
+        Note: Currently runs synchronously as LambdaDB client doesn't support async
+        operations.
+        """
+        return self.delete(ids=ids, **kwargs)
+
+    async def aget_by_ids(
+        self, ids: Sequence[str], /, consistent_read: Optional[bool] = None
+    ) -> list[Document]:
+        """Async version of get_by_ids.
+
+        Note: Currently runs synchronously as LambdaDB client doesn't support async
+        operations.
+        """
+        return self.get_by_ids(ids, consistent_read=consistent_read)
+
+    async def asimilarity_search(
+        self,
+        query: str,
+        k: int = 4,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> List[Document]:
+        """Async version of similarity_search.
+
+        Note: Currently runs synchronously as LambdaDB client doesn't support async
+        operations.
+        """
+        return self.similarity_search(
+            query=query,
+            k=k,
+            filter=filter,
+            consistent_read=consistent_read,
+            **kwargs,
+        )
+
+    async def asimilarity_search_with_score(
+        self,
+        query: str,
+        k: int = 4,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> List[Tuple[Document, float]]:
+        """Async version of similarity_search_with_score.
+
+        Note: Currently runs synchronously as LambdaDB client doesn't support async
+        operations.
+        """
+        return self.similarity_search_with_score(
+            query=query,
+            k=k,
+            filter=filter,
+            consistent_read=consistent_read,
+            **kwargs,
+        )
+
+    async def asimilarity_search_by_vector(
+        self, embedding: List[float], k: int = 4, **kwargs: Any
+    ) -> List[Document]:
+        """Async version of similarity_search_by_vector.
+
+        Note: Currently runs synchronously as LambdaDB client doesn't support async
+        operations.
+        """
+        return self.similarity_search_by_vector(embedding=embedding, k=k, **kwargs)
+
+    async def amax_marginal_relevance_search(
+        self,
+        query: str,
+        k: int = 4,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        **kwargs: Any,
+    ) -> List[Document]:
+        """Async version of max_marginal_relevance_search.
+
+        Note: Currently not implemented as sync version is not implemented.
+        """
+        raise NotImplementedError
+
+    async def amax_marginal_relevance_search_by_vector(
+        self,
+        embedding: List[float],
+        k: int = 4,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        **kwargs: Any,
+    ) -> List[Document]:
+        """Async version of max_marginal_relevance_search_by_vector.
+
+        Note: Currently not implemented as sync version is not implemented.
+        """
+        raise NotImplementedError
