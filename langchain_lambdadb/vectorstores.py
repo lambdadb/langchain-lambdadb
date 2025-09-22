@@ -14,10 +14,13 @@ from typing import (
     TypeVar,
 )
 
+import numpy as np
+
 from lambdadb import LambdaDB
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore
+from langchain_core.vectorstores.utils import maximal_marginal_relevance
 
 VST = TypeVar("VST", bound=VectorStore)
 
@@ -530,9 +533,40 @@ class LambdaDBVectorStore(VectorStore):
         k: int = 4,
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: Optional[bool] = None,
         **kwargs: Any,
     ) -> List[Document]:
-        raise NotImplementedError
+        """Return docs selected using the maximal marginal relevance.
+
+        Maximal marginal relevance optimizes for similarity to query AND diversity
+        among selected documents.
+
+        Args:
+            query: Text to look up documents similar to.
+            k: Number of Documents to return. Defaults to 4.
+            fetch_k: Number of Documents to fetch to pass to MMR algorithm.
+                     Defaults to 20.
+            lambda_mult: Number between 0 and 1 that determines the degree
+                        of diversity among the results with 0 corresponding
+                        to maximum diversity and 1 to minimum diversity.
+                        Defaults to 0.5.
+            filter: Filter by metadata. Defaults to None.
+            consistent_read: Whether to use consistent read. Defaults to None.
+
+        Returns:
+            List of Documents selected by maximal marginal relevance.
+        """
+        embedding = self.embedding.embed_query(query)
+        return self.max_marginal_relevance_search_by_vector(
+            embedding=embedding,
+            k=k,
+            fetch_k=fetch_k,
+            lambda_mult=lambda_mult,
+            filter=filter,
+            consistent_read=consistent_read,
+            **kwargs,
+        )
 
     def max_marginal_relevance_search_by_vector(
         self,
@@ -540,9 +574,100 @@ class LambdaDBVectorStore(VectorStore):
         k: int = 4,
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: Optional[bool] = None,
         **kwargs: Any,
     ) -> List[Document]:
-        raise NotImplementedError
+        """Return docs selected using the maximal marginal relevance.
+
+        Maximal marginal relevance optimizes for similarity to query AND diversity
+        among selected documents.
+
+        Args:
+            embedding: Embedding to look up documents similar to.
+            k: Number of Documents to return. Defaults to 4.
+            fetch_k: Number of Documents to fetch to pass to MMR algorithm.
+                     Defaults to 20.
+            lambda_mult: Number between 0 and 1 that determines the degree
+                        of diversity among the results with 0 corresponding
+                        to maximum diversity and 1 to minimum diversity.
+                        Defaults to 0.5.
+            filter: Filter by metadata. Defaults to None.
+            consistent_read: Whether to use consistent read. Defaults to None.
+
+        Returns:
+            List of Documents selected by maximal marginal relevance.
+        """
+        # Use proper LambdaDB knn query format to fetch more documents
+        query = {
+            "knn": {"field": self._vector_field, "queryVector": embedding, "k": fetch_k}
+        }
+
+        # If filter provided, add it to the knn query
+        if filter:
+            if isinstance(filter, dict) and "query" in filter:
+                query["knn"]["filter"] = filter
+            elif isinstance(filter, dict):
+                # Convert filter dict to queryString format
+                query["knn"]["filter"] = {"queryString": {"query": str(filter)}}
+            else:
+                query["knn"]["filter"] = {"queryString": {"query": str(filter)}}
+
+        if consistent_read is None:
+            consistent_read = self._default_consistent_read
+
+        # Query with include_vectors to get the embeddings for MMR
+        try:
+            docs = self._client.collections.query(
+                collection_name=self._collection_name,
+                size=fetch_k,
+                query=query,
+                consistent_read=consistent_read,
+                include_vectors=True,  # Essential for MMR
+            ).docs
+        except TypeError:
+            # Fallback if include_vectors parameter is not supported
+            docs = self._client.collections.query(
+                collection_name=self._collection_name,
+                size=fetch_k,
+                query=query,
+                consistent_read=consistent_read,
+            ).docs
+
+        if not docs:
+            return []
+
+        # Extract embeddings from the documents
+        embeddings_list = []
+        documents_list = []
+
+        for doc in docs:
+            langchain_doc = self._build_langchain_document(doc.doc)
+            documents_list.append(langchain_doc)
+
+            # Try to get vector from document
+            doc_vector = None
+            if hasattr(doc, "doc") and hasattr(doc.doc, self._vector_field):
+                doc_vector = getattr(doc.doc, self._vector_field)
+            elif isinstance(doc.doc, dict) and self._vector_field in doc.doc:
+                doc_vector = doc.doc[self._vector_field]
+
+            if doc_vector is not None:
+                embeddings_list.append(doc_vector)
+            else:
+                # If vector is not included, we can't do MMR - fallback to regular search
+                return documents_list[:k]
+
+        # Apply MMR algorithm (convert to numpy arrays)
+        mmr_indices = maximal_marginal_relevance(
+            query_embedding=np.array(embedding),
+            embedding_list=embeddings_list,  # List of vectors
+            lambda_mult=lambda_mult,
+            k=k,
+        )
+
+        # Return documents selected by MMR
+        return [documents_list[i] for i in mmr_indices]
 
     ### ASYNC METHODS ###
 
@@ -649,13 +774,24 @@ class LambdaDBVectorStore(VectorStore):
         k: int = 4,
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: Optional[bool] = None,
         **kwargs: Any,
     ) -> List[Document]:
         """Async version of max_marginal_relevance_search.
 
-        Note: Currently not implemented as sync version is not implemented.
+        Note: Currently runs synchronously as LambdaDB client doesn't support async
+        operations.
         """
-        raise NotImplementedError
+        return self.max_marginal_relevance_search(
+            query=query,
+            k=k,
+            fetch_k=fetch_k,
+            lambda_mult=lambda_mult,
+            filter=filter,
+            consistent_read=consistent_read,
+            **kwargs,
+        )
 
     async def amax_marginal_relevance_search_by_vector(
         self,
@@ -663,10 +799,21 @@ class LambdaDBVectorStore(VectorStore):
         k: int = 4,
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: Optional[bool] = None,
         **kwargs: Any,
     ) -> List[Document]:
         """Async version of max_marginal_relevance_search_by_vector.
 
-        Note: Currently not implemented as sync version is not implemented.
+        Note: Currently runs synchronously as LambdaDB client doesn't support async
+        operations.
         """
-        raise NotImplementedError
+        return self.max_marginal_relevance_search_by_vector(
+            embedding=embedding,
+            k=k,
+            fetch_k=fetch_k,
+            lambda_mult=lambda_mult,
+            filter=filter,
+            consistent_read=consistent_read,
+            **kwargs,
+        )
