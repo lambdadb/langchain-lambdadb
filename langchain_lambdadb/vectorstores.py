@@ -168,7 +168,7 @@ class LambdaDBVectorStore(VectorStore):
         text_field: str = "text",
         vector_field: str = "vector",
         validate_collection: bool = True,
-        default_consistent_read: bool = True,
+        default_consistent_read: bool = False,
     ) -> None:
         """Initialize with the given embedding function.
 
@@ -186,7 +186,7 @@ class LambdaDBVectorStore(VectorStore):
                 read operations. When True, ensures immediate consistency but may have
                 slight performance impact. When False, uses eventual consistency which
                 is faster but may return stale data for ~1 minute after writes
-                (default: True).
+                (default: False).
 
         Note:
             This integration is designed to work with existing LambdaDB collections.
