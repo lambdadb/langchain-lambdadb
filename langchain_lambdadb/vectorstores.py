@@ -302,6 +302,15 @@ class LambdaDBVectorStore(VectorStore):
             List of ids from adding the texts into the vectorstore.
         """
         texts = list(texts)
+
+        for index, text in enumerate(texts):
+            # 50KB is the max size of a document for LambdaDB
+            # Measuring only on the text part is technically insufficient, but it still provides a good guide.
+            if 50 * 1000 < len(text):
+                raise ValueError(
+                    f"The text at index {index} is too long. Max length is 50KB."
+                )
+
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in texts]
         else:
@@ -331,15 +340,16 @@ class LambdaDBVectorStore(VectorStore):
 
         # Use regular upsert method for consistent immediate indexing
         # Process in batches to stay under 6MB limit per request
+        # SAFETY: Setting batch size to 100 is safe, because we've checked that there is no document longer than 50KB.
         added_ids = []
-        batch_size = 50  # Conservative batch size for 6MB limit
+        batch_size = 100  # Conservative batch size for 6MB limit
 
         for i in range(0, len(docs), batch_size):
             batch_docs = docs[i : i + batch_size]
             batch_ids = ids[i : i + batch_size]
 
             try:
-                self._client.collections.docs.upsert(
+                self._client.collections.docs.upsert_async(
                     collection_name=self._collection_name, docs=batch_docs
                 )
                 added_ids.extend(batch_ids)
