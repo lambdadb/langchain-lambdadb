@@ -17,9 +17,6 @@ class TestLambdaDBVectorStore(VectorStoreIntegrationTests):
     To run with real LambdaDB service, set these environment variables:
     - LAMBDADB_API_KEY: Your LambdaDB API key
     - LAMBDADB_SERVER_URL: LambdaDB service endpoint
-
-    Note: LambdaDB playground environment has indexing delays (~30-60s),
-    so these tests will be slower than typical vectorstore tests.
     """
 
     @pytest.fixture()
