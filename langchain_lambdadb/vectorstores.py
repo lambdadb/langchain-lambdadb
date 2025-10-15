@@ -439,20 +439,13 @@ class LambdaDBVectorStore(VectorStore):
         k: int = 4,
         filter: Optional[dict[str, Any]] = None,
         consistent_read: Optional[bool] = None,
-        **kwargs: Any,
     ) -> List[tuple[Document, float]]:
         # Use proper LambdaDB knn query format
         query = {"knn": {"field": self._vector_field, "queryVector": embedding, "k": k}}
 
         # If filter provided, add it to the knn query
         if filter:
-            if isinstance(filter, dict) and "query" in filter:
-                query["knn"]["filter"] = filter
-            elif isinstance(filter, dict):
-                # Convert filter dict to queryString format
-                query["knn"]["filter"] = {"queryString": {"query": str(filter)}}
-            else:
-                query["knn"]["filter"] = {"queryString": {"query": str(filter)}}
+            query["knn"]["filter"] = filter
 
         if consistent_read is None:
             consistent_read = self._default_consistent_read
@@ -605,13 +598,7 @@ class LambdaDBVectorStore(VectorStore):
 
         # If filter provided, add it to the knn query
         if filter:
-            if isinstance(filter, dict) and "query" in filter:
-                query["knn"]["filter"] = filter
-            elif isinstance(filter, dict):
-                # Convert filter dict to queryString format
-                query["knn"]["filter"] = {"queryString": {"query": str(filter)}}
-            else:
-                query["knn"]["filter"] = {"queryString": {"query": str(filter)}}
+            query["knn"]["filter"] = filter
 
         if consistent_read is None:
             consistent_read = self._default_consistent_read
