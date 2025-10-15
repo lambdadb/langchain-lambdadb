@@ -15,8 +15,8 @@ class TestLambdaDBVectorStore(VectorStoreIntegrationTests):
     """Integration tests for LambdaDB vector store.
 
     To run with real LambdaDB service, set these environment variables:
-    - LAMBDADB_API_KEY: Your LambdaDB API key
-    - LAMBDADB_SERVER_URL: LambdaDB service endpoint
+    - LAMBDADB_PROJECT_URL: LambdaDB service endpoint
+    - LAMBDADB_PROJECT_API_KEY: Your LambdaDB API key
     """
 
     @pytest.fixture()
@@ -24,8 +24,8 @@ class TestLambdaDBVectorStore(VectorStoreIntegrationTests):
         """Get an empty vectorstore for unit tests."""
         # Initialize LambdaDB client with environment credentials
         client = LambdaDB(
-            server_url=os.getenv("LAMBDADB_SERVER_URL"),
-            project_api_key=os.getenv("LAMBDADB_API_KEY"),
+            server_url=os.getenv("LAMBDADB_PROJECT_URL"),
+            project_api_key=os.getenv("LAMBDADB_PROJECT_API_KEY"),
         )
 
         # Use environment variable for collection name, or generate unique one for testing

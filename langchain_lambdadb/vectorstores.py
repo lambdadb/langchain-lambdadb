@@ -57,8 +57,8 @@ class LambdaDBVectorStore(VectorStore):
 
             # Initialize client
             client = LambdaDB(
-                server_url="https://api.lambdadb.ai/projects/<project_id>",
-                project_api_key="<your_api_key>"
+                project_url="<your_project_url>",
+                project_api_key="<your_project_api_key>"
             )
 
             # Use existing collection

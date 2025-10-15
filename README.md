@@ -23,8 +23,9 @@ Create a collection in LambdaDB with the required indexes:
 from lambdadb import LambdaDB, models
 
 client = LambdaDB(
-    server_url="https://api.lambdadb.ai/projects/<your-project-id>",
-    project_api_key="<your-api-key>"
+    server_url="<your-project-url>",
+    project_api_key="<your-project-api-key>"
+
 )
 
 # Create collection with vector and text indexes
@@ -55,8 +56,8 @@ from langchain_core.documents import Document
 
 # Set up LambdaDB client
 client = LambdaDB(
-    server_url=os.getenv("LAMBDADB_SERVER_URL"),
-    project_api_key=os.getenv("LAMBDADB_API_KEY")
+    server_url=os.getenv("LAMBDADB_PROJECT_URL"),
+    project_api_key=os.getenv("LAMBDADB_PROJECT_API_KEY")
 )
 
 # Connect to existing collection
@@ -85,8 +86,8 @@ for doc in results:
 Set the following environment variables:
 
 ```bash
-export LAMBDADB_API_KEY="your-api-key"
-export LAMBDADB_SERVER_URL="https://api.lambdadb.ai/projects/<your-project-id>"
+export LAMBDADB_PROJECT_URL="<your-project-url>"
+export LAMBDADB_PROJECT_API_KEY="<your-project-api-key>"
 ```
 
 ## Vector Store Features
@@ -154,8 +155,8 @@ poetry install --with test,lint
 make test
 
 # Run integration tests with real LambdaDB (requires credentials)
-export LAMBDADB_API_KEY="your-api-key"
-export LAMBDADB_SERVER_URL="https://api.lambdadb.ai/projects/<your-project-id>"
+export LAMBDADB_PROJECT_URL="<your-project-url>"
+export LAMBDADB_PROJECT_API_KEY="<your-project-api-key>"
 # Optional: Use existing collection instead of creating test collections
 export LAMBDADB_COLLECTION_NAME="your-test-collection"
 make integration_tests
