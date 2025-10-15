@@ -12,12 +12,12 @@ pip install -U langchain-lambdadb
 
 Before using this integration, you need to:
 
-1. Create a collection in LambdaDB with proper vector and text indices
+1. Create a collection in LambdaDB with proper vector and text indexes
 2. Have your LambdaDB credentials ready
 
 ### Creating a Collection
 
-Create a collection in LambdaDB with the required indices:
+Create a collection in LambdaDB with the required indexes:
 
 ```python
 from lambdadb import LambdaDB, models
@@ -27,7 +27,7 @@ client = LambdaDB(
     project_api_key="<your-api-key>"
 )
 
-# Create collection with vector and text indices
+# Create collection with vector and text indexes
 client.collections.create(
     collection_name="my_collection",
     index_configs={

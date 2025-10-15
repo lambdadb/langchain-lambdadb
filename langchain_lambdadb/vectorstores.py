@@ -29,7 +29,7 @@ class LambdaDBVectorStore(VectorStore):
     """LambdaDB vector store integration.
 
     This integration works with existing LambdaDB collections. The collection must be
-    created beforehand with proper vector and text indices configured.
+    created beforehand with proper vector and text indexes configured.
 
     Setup:
         Install ``langchain-lambdadb`` package.
@@ -175,7 +175,7 @@ class LambdaDBVectorStore(VectorStore):
         Args:
             client: LambdaDB client. Documentation: https://docs.lambdadb.ai
             collection_name: Name of an existing collection in LambdaDB.
-                The collection must already exist and have proper vector indices
+                The collection must already exist and have proper vector indexes
                 configured.
             embedding: embedding function to use.
             text_field: Name of the text field in documents (default: "text").
@@ -191,7 +191,7 @@ class LambdaDBVectorStore(VectorStore):
         Note:
             This integration is designed to work with existing LambdaDB collections.
             The collection should be created beforehand with appropriate vector and text
-            indices.
+            indexes.
         """
         if client is None or not isinstance(client, LambdaDB):
             raise ValueError(
@@ -226,7 +226,7 @@ class LambdaDBVectorStore(VectorStore):
                     f"Collection '{collection_name}' does not exist or is not "
                     f"accessible. "
                     f"Please create the collection first with proper vector and text "
-                    f"indices. "
+                    f"indexes. "
                     f"Error: {e}"
                 )
 
@@ -659,7 +659,7 @@ class LambdaDBVectorStore(VectorStore):
                 return documents_list[:k]
 
         # Apply MMR algorithm (convert to numpy arrays)
-        mmr_indices = maximal_marginal_relevance(
+        mmr_indexes = maximal_marginal_relevance(
             query_embedding=np.array(embedding),
             embedding_list=embeddings_list,  # List of vectors
             lambda_mult=lambda_mult,
@@ -667,7 +667,7 @@ class LambdaDBVectorStore(VectorStore):
         )
 
         # Return documents selected by MMR
-        return [documents_list[i] for i in mmr_indices]
+        return [documents_list[i] for i in mmr_indexes]
 
     ### ASYNC METHODS ###
 
