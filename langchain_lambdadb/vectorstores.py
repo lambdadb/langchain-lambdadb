@@ -349,7 +349,7 @@ class LambdaDBVectorStore(VectorStore):
             batch_ids = ids[i : i + batch_size]
 
             try:
-                self._client.collections.docs.upsert_async(
+                self._client.collections.docs.upsert(
                     collection_name=self._collection_name, docs=batch_docs
                 )
                 added_ids.extend(batch_ids)
