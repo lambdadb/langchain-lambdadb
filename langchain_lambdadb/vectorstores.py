@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterable
 from typing import (
@@ -15,7 +16,6 @@ from typing import (
 )
 
 import numpy as np
-
 from lambdadb import LambdaDB
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -23,6 +23,9 @@ from langchain_core.vectorstores import VectorStore
 from langchain_core.vectorstores.utils import maximal_marginal_relevance
 
 VST = TypeVar("VST", bound=VectorStore)
+
+# Payload size threshold: use upsert() below this, bulk_upsert_docs() above (LambdaDB)
+UPSERT_PAYLOAD_SIZE_THRESHOLD_BYTES = 1024 * 1024  # 1MB
 
 
 class LambdaDBVectorStore(VectorStore):
@@ -55,10 +58,11 @@ class LambdaDBVectorStore(VectorStore):
             from langchain_openai import OpenAIEmbeddings
             from lambdadb import LambdaDB
 
-            # Initialize client
+            # Initialize client (use base_url + project_name for 0.7.0+)
             client = LambdaDB(
-                project_url="<your_project_url>",
-                project_api_key="<your_project_api_key>"
+                base_url="https://api.lambdadb.ai",
+                project_name="playground",
+                project_api_key="<your_project_api_key>",
             )
 
             # Use existing collection
@@ -232,6 +236,8 @@ class LambdaDBVectorStore(VectorStore):
 
         self._client = client
         self._collection_name = collection_name
+        # Collection-scoped API (0.7.0+): avoids repeating collection_name on every call
+        self._coll = client.collection(collection_name)
         self.embedding = embedding
         self._text_field = text_field
         self._vector_field = vector_field
@@ -303,14 +309,6 @@ class LambdaDBVectorStore(VectorStore):
         """
         texts = list(texts)
 
-        for index, text in enumerate(texts):
-            # 50KB is the max size of a document for LambdaDB
-            # Measuring only on the text part is technically insufficient, but it still provides a good guide.
-            if 50 * 1000 < len(text):
-                raise ValueError(
-                    f"The text at index {index} is too long. Max length is 50KB."
-                )
-
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in texts]
         else:
@@ -325,38 +323,35 @@ class LambdaDBVectorStore(VectorStore):
 
         vectors = self.embedding.embed_documents(texts)
 
-        # Prepare all documents for bulk upsert
+        # Prepare all documents for upsert
         docs = []
         for idx, text in enumerate(texts):
             metadata = metadatas[idx] if metadatas else {}
-            docs.append(
-                {
-                    "id": ids[idx],
-                    self._text_field: text,
-                    self._vector_field: vectors[idx],
-                    "metadata": metadata,
-                }
-            )
+            doc = {
+                "id": ids[idx],
+                self._text_field: text,
+                self._vector_field: vectors[idx],
+                "metadata": metadata,
+            }
+            # Ensure vector is list for payload size check and JSON serialization
+            vec = doc[self._vector_field]
+            if isinstance(vec, np.ndarray):
+                doc[self._vector_field] = vec.tolist()
+            docs.append(doc)
 
-        # Use regular upsert method for consistent immediate indexing
-        # Process in batches to stay under 6MB limit per request
-        # SAFETY: Setting batch size to 100 is safe, because we've checked that there is no document longer than 50KB.
-        added_ids = []
-        batch_size = 100  # Conservative batch size for 6MB limit
-
-        for i in range(0, len(docs), batch_size):
-            batch_docs = docs[i : i + batch_size]
-            batch_ids = ids[i : i + batch_size]
-
+        payload_size = len(json.dumps(docs))
+        if payload_size <= UPSERT_PAYLOAD_SIZE_THRESHOLD_BYTES:
             try:
-                self._client.collections.docs.upsert(
-                    collection_name=self._collection_name, docs=batch_docs
-                )
-                added_ids.extend(batch_ids)
+                self._coll.docs.upsert(docs=docs)
+            except Exception as e:
+                raise RuntimeError(f"Upsert operation failed: {str(e)}") from e
+        else:
+            try:
+                self._coll.docs.bulk_upsert_docs(docs=docs)
             except Exception as e:
                 raise RuntimeError(f"Upsert operation failed: {str(e)}") from e
 
-        return added_ids
+        return list(ids)
 
     def add_documents(
         self,
@@ -381,10 +376,7 @@ class LambdaDBVectorStore(VectorStore):
     def delete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> None:
         if ids:
             try:
-                self._client.collections.docs.delete(
-                    collection_name=self._collection_name,
-                    ids=ids,
-                )
+                self._coll.docs.delete(ids=ids)
             except Exception as e:
                 # Handle cases where documents don't exist gracefully
                 error_message = str(e).lower()
@@ -399,11 +391,22 @@ class LambdaDBVectorStore(VectorStore):
                 else:
                     raise (e)
 
-    def _build_langchain_document(self, doc: dict) -> Document:
+    def _to_doc_dict(self, raw: Any) -> dict:
+        """Normalize SDK response item to dict (handles Pydantic models)."""
+        if isinstance(raw, dict):
+            return raw
+        if hasattr(raw, "model_dump"):
+            return raw.model_dump()
+        if hasattr(raw, "dict"):
+            return raw.dict()
+        raise TypeError(f"Expected dict or model with doc body, got {type(raw)}")
+
+    def _build_langchain_document(self, doc: Any) -> Document:
+        d = self._to_doc_dict(doc)
         return Document(
-            id=doc["id"],
-            page_content=doc[self._text_field],
-            metadata=doc["metadata"],
+            id=d["id"],
+            page_content=d[self._text_field],
+            metadata=d.get("metadata", {}),
         )
 
     def get_by_ids(
@@ -422,26 +425,11 @@ class LambdaDBVectorStore(VectorStore):
         if consistent_read is None:
             consistent_read = self._default_consistent_read
 
-        fetched_docs = self._client.collections.docs.fetch(
-            collection_name=self._collection_name,
+        resp = self._coll.docs.fetch(
             ids=list(ids),
             consistent_read=consistent_read,
-        ).docs
-
-        # Create a mapping from ID to Document since LambdaDB doesn't preserve order
-        doc_map = {}
-        for doc in fetched_docs:
-            langchain_doc = self._build_langchain_document(doc.doc)
-            doc_map[langchain_doc.id] = langchain_doc
-
-        # Return documents in the same order as requested IDs
-        # Skip IDs that weren't found (LangChain tests expect this behavior)
-        ordered_docs = []
-        for id in ids:
-            if id in doc_map:
-                ordered_docs.append(doc_map[id])
-
-        return ordered_docs
+        )
+        return self._parse_fetch_response(resp, ids)
 
     def _similarity_search_with_score_by_vector(
         self,
@@ -460,28 +448,12 @@ class LambdaDBVectorStore(VectorStore):
         if consistent_read is None:
             consistent_read = self._default_consistent_read
 
-        docs = self._client.collections.query(
-            collection_name=self._collection_name,
+        resp = self._coll.query(
             size=k,
             query=query,
             consistent_read=consistent_read,
-        ).docs
-
-        if not docs:
-            return []
-
-        results = []
-        for doc in docs:
-            langchain_doc = self._build_langchain_document(doc.doc)
-            # LambdaDB returns relevance score in doc.score
-            score: float = (
-                float(doc.score)
-                if hasattr(doc, "score") and doc.score is not None
-                else 1.0
-            )
-            results.append((langchain_doc, score))
-
-        return results
+        )
+        return self._parse_query_response(resp)
 
     def similarity_search(
         self,
@@ -613,46 +585,25 @@ class LambdaDBVectorStore(VectorStore):
         if consistent_read is None:
             consistent_read = self._default_consistent_read
 
-        # Query with include_vectors to get the embeddings for MMR
-        try:
-            docs = self._client.collections.query(
-                collection_name=self._collection_name,
-                size=fetch_k,
-                query=query,
-                consistent_read=consistent_read,
-                include_vectors=True,  # Essential for MMR
-            ).docs
-        except TypeError:
-            # Fallback if include_vectors parameter is not supported
-            docs = self._client.collections.query(
-                collection_name=self._collection_name,
-                size=fetch_k,
-                query=query,
-                consistent_read=consistent_read,
-            ).docs
+        resp = self._coll.query(
+            size=fetch_k,
+            query=query,
+            consistent_read=consistent_read,
+            include_vectors=True,  # Required for MMR
+        )
 
-        if not docs:
-            return []
-
-        # Extract embeddings from the documents
         embeddings_list = []
         documents_list = []
-
-        for doc in docs:
-            langchain_doc = self._build_langchain_document(doc.doc)
+        for item in resp.results:
+            langchain_doc = self._build_langchain_document(item.doc)
             documents_list.append(langchain_doc)
-
-            # Try to get vector from document
-            doc_vector = None
-            if hasattr(doc, "doc") and hasattr(doc.doc, self._vector_field):
-                doc_vector = getattr(doc.doc, self._vector_field)
-            elif isinstance(doc.doc, dict) and self._vector_field in doc.doc:
-                doc_vector = doc.doc[self._vector_field]
+            d = self._to_doc_dict(item.doc)
+            doc_vector = d.get(self._vector_field)
 
             if doc_vector is not None:
                 embeddings_list.append(doc_vector)
             else:
-                # If vector is not included, we can't do MMR - fallback to regular search
+                # If vector is not included, we can't do MMR - fallback to regular
                 return documents_list[:k]
 
         # Apply MMR algorithm (convert to numpy arrays)
@@ -666,7 +617,24 @@ class LambdaDBVectorStore(VectorStore):
         # Return documents selected by MMR
         return [documents_list[i] for i in mmr_indexes]
 
-    ### ASYNC METHODS ###
+    def _parse_fetch_response(self, resp: Any, ids: Sequence[str]) -> list[Document]:
+        """Build ordered list of Documents from fetch response (LambdaDB 0.7.0+)."""
+        doc_map = {}
+        for item in resp.results:
+            langchain_doc = self._build_langchain_document(item.doc)
+            doc_map[langchain_doc.id] = langchain_doc
+        return [doc_map[id] for id in ids if id in doc_map]
+
+    def _parse_query_response(self, resp: Any) -> List[tuple[Document, float]]:
+        """Build list of (Document, score) from query response (LambdaDB 0.7.0+)."""
+        results = []
+        for item in resp.results:
+            doc = self._build_langchain_document(item.doc)
+            score = float(item.score) if item.score is not None else 1.0
+            results.append((doc, score))
+        return results
+
+    ### ASYNC METHODS (use LambdaDB SDK *_async) ###
 
     async def aadd_texts(
         self,
@@ -675,43 +643,115 @@ class LambdaDBVectorStore(VectorStore):
         ids: Optional[Sequence[str]] = None,
         **kwargs: Any,
     ) -> list[str]:
-        """Async version of add_texts.
+        """Async add_texts using SDK bulk_upsert_docs_async / upsert_async."""
+        texts = list(texts)
 
-        Note: Currently runs synchronously as LambdaDB client doesn't support async
-        operations.
-        """
-        # LambdaDB client doesn't have async support yet, so we run sync version
-        return self.add_texts(texts=texts, metadatas=metadatas, ids=ids, **kwargs)
+        if ids is None:
+            ids = [str(uuid.uuid4()) for _ in texts]
+        else:
+            if len(ids) != len(texts):
+                raise ValueError(
+                    f"ids must be the same length as texts. "
+                    f"Got {len(ids)} ids and {len(texts)} texts."
+                )
+            ids = [str(id) if id is not None else str(uuid.uuid4()) for id in ids]
+
+        vectors = await self.embedding.aembed_documents(texts)
+
+        docs = []
+        for idx, text in enumerate(texts):
+            metadata = metadatas[idx] if metadatas else {}
+            doc = {
+                "id": ids[idx],
+                self._text_field: text,
+                self._vector_field: vectors[idx],
+                "metadata": metadata,
+            }
+            vec = doc[self._vector_field]
+            if isinstance(vec, np.ndarray):
+                doc[self._vector_field] = vec.tolist()
+            docs.append(doc)
+
+        payload_size = len(json.dumps(docs))
+        if payload_size <= UPSERT_PAYLOAD_SIZE_THRESHOLD_BYTES:
+            try:
+                await self._coll.docs.upsert_async(docs=docs)
+            except Exception as e:
+                raise RuntimeError(f"Upsert operation failed: {str(e)}") from e
+        else:
+            try:
+                await self._coll.docs.bulk_upsert_docs_async(docs=docs)
+            except Exception as e:
+                raise RuntimeError(f"Upsert operation failed: {str(e)}") from e
+
+        return list(ids)
 
     async def aadd_documents(
         self,
         documents: List[Document],
         **kwargs: Any,
     ) -> List[str]:
-        """Async version of add_documents.
-
-        Note: Currently runs synchronously as LambdaDB client doesn't support async
-        operations.
-        """
-        return self.add_documents(documents=documents, **kwargs)
+        """Async version of add_documents."""
+        texts = [doc.page_content for doc in documents]
+        metadatas = [doc.metadata for doc in documents]
+        ids = kwargs.get("ids")
+        if ids is None:
+            ids = [doc.id if doc.id is not None else None for doc in documents]
+            if all(id is None for id in ids):
+                ids = None
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k != "ids"}
+        return await self.aadd_texts(texts, metadatas, ids=ids, **filtered_kwargs)
 
     async def adelete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> None:
-        """Async version of delete.
-
-        Note: Currently runs synchronously as LambdaDB client doesn't support async
-        operations.
-        """
-        return self.delete(ids=ids, **kwargs)
+        """Async version of delete using SDK delete_async."""
+        if ids:
+            try:
+                await self._coll.docs.delete_async(ids=ids)
+            except Exception as e:
+                error_message = str(e).lower()
+                if (
+                    "not found" in error_message
+                    or "does not exist" in error_message
+                    or "creating state" in error_message
+                    or "badrequest" in error_message
+                ):
+                    pass
+                else:
+                    raise e
 
     async def aget_by_ids(
         self, ids: Sequence[str], /, consistent_read: Optional[bool] = None
     ) -> list[Document]:
-        """Async version of get_by_ids.
+        """Async version of get_by_ids using SDK fetch_async."""
+        if consistent_read is None:
+            consistent_read = self._default_consistent_read
 
-        Note: Currently runs synchronously as LambdaDB client doesn't support async
-        operations.
-        """
-        return self.get_by_ids(ids, consistent_read=consistent_read)
+        resp = await self._coll.docs.fetch_async(
+            ids=list(ids),
+            consistent_read=consistent_read,
+        )
+        return self._parse_fetch_response(resp, ids)
+
+    async def _similarity_search_with_score_by_vector_async(
+        self,
+        embedding: List[float],
+        k: int = 4,
+        filter: Optional[dict[str, Any]] = None,
+        consistent_read: Optional[bool] = None,
+    ) -> List[tuple[Document, float]]:
+        """Async KNN search by vector using SDK query_async."""
+        query = {"knn": {"field": self._vector_field, "queryVector": embedding, "k": k}}
+        if filter:
+            query["knn"]["filter"] = filter
+        if consistent_read is None:
+            consistent_read = self._default_consistent_read
+
+        resp = await self._coll.query_async(
+            size=k,
+            query=query,
+            consistent_read=consistent_read,
+        )
+        return self._parse_query_response(resp)
 
     async def asimilarity_search(
         self,
@@ -721,18 +761,16 @@ class LambdaDBVectorStore(VectorStore):
         consistent_read: Optional[bool] = None,
         **kwargs: Any,
     ) -> List[Document]:
-        """Async version of similarity_search.
-
-        Note: Currently runs synchronously as LambdaDB client doesn't support async
-        operations.
-        """
-        return self.similarity_search(
-            query=query,
+        """Async version of similarity_search using SDK query_async."""
+        embedding = await self.embedding.aembed_query(query)
+        pairs = await self._similarity_search_with_score_by_vector_async(
+            embedding=embedding,
             k=k,
             filter=filter,
             consistent_read=consistent_read,
             **kwargs,
         )
+        return [doc for doc, _ in pairs]
 
     async def asimilarity_search_with_score(
         self,
@@ -742,13 +780,10 @@ class LambdaDBVectorStore(VectorStore):
         consistent_read: Optional[bool] = None,
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
-        """Async version of similarity_search_with_score.
-
-        Note: Currently runs synchronously as LambdaDB client doesn't support async
-        operations.
-        """
-        return self.similarity_search_with_score(
-            query=query,
+        """Async version of similarity_search_with_score using SDK query_async."""
+        embedding = await self.embedding.aembed_query(query)
+        return await self._similarity_search_with_score_by_vector_async(
+            embedding=embedding,
             k=k,
             filter=filter,
             consistent_read=consistent_read,
@@ -758,12 +793,11 @@ class LambdaDBVectorStore(VectorStore):
     async def asimilarity_search_by_vector(
         self, embedding: List[float], k: int = 4, **kwargs: Any
     ) -> List[Document]:
-        """Async version of similarity_search_by_vector.
-
-        Note: Currently runs synchronously as LambdaDB client doesn't support async
-        operations.
-        """
-        return self.similarity_search_by_vector(embedding=embedding, k=k, **kwargs)
+        """Async version of similarity_search_by_vector using SDK query_async."""
+        pairs = await self._similarity_search_with_score_by_vector_async(
+            embedding=embedding, k=k, **kwargs
+        )
+        return [doc for doc, _ in pairs]
 
     async def amax_marginal_relevance_search(
         self,
@@ -775,13 +809,10 @@ class LambdaDBVectorStore(VectorStore):
         consistent_read: Optional[bool] = None,
         **kwargs: Any,
     ) -> List[Document]:
-        """Async version of max_marginal_relevance_search.
-
-        Note: Currently runs synchronously as LambdaDB client doesn't support async
-        operations.
-        """
-        return self.max_marginal_relevance_search(
-            query=query,
+        """Async version of max_marginal_relevance_search using SDK query_async."""
+        embedding = await self.embedding.aembed_query(query)
+        return await self.amax_marginal_relevance_search_by_vector(
+            embedding=embedding,
             k=k,
             fetch_k=fetch_k,
             lambda_mult=lambda_mult,
@@ -800,17 +831,37 @@ class LambdaDBVectorStore(VectorStore):
         consistent_read: Optional[bool] = None,
         **kwargs: Any,
     ) -> List[Document]:
-        """Async version of max_marginal_relevance_search_by_vector.
+        """Async MMR search by vector using SDK query_async (include_vectors=True)."""
+        query = {
+            "knn": {"field": self._vector_field, "queryVector": embedding, "k": fetch_k}
+        }
+        if filter:
+            query["knn"]["filter"] = filter
+        if consistent_read is None:
+            consistent_read = self._default_consistent_read
 
-        Note: Currently runs synchronously as LambdaDB client doesn't support async
-        operations.
-        """
-        return self.max_marginal_relevance_search_by_vector(
-            embedding=embedding,
-            k=k,
-            fetch_k=fetch_k,
-            lambda_mult=lambda_mult,
-            filter=filter,
+        resp = await self._coll.query_async(
+            size=fetch_k,
+            query=query,
             consistent_read=consistent_read,
-            **kwargs,
+            include_vectors=True,  # Required for MMR
         )
+
+        embeddings_list = []
+        documents_list = []
+        for item in resp.results:
+            documents_list.append(self._build_langchain_document(item.doc))
+            d = self._to_doc_dict(item.doc)
+            doc_vector = d.get(self._vector_field)
+            if doc_vector is not None:
+                embeddings_list.append(doc_vector)
+            else:
+                return documents_list[:k]
+
+        mmr_indexes = maximal_marginal_relevance(
+            query_embedding=np.array(embedding),
+            embedding_list=embeddings_list,
+            lambda_mult=lambda_mult,
+            k=k,
+        )
+        return [documents_list[i] for i in mmr_indexes]

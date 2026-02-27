@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "langchain-lambdadb"
-version = "0.1.0"
+version = "0.1.1"
 description = "An integration package connecting LambdaDB and LangChain"
 authors = []
 readme = "README.md"
@@ -21,7 +21,8 @@ disallow_untyped_defs = "True"
 [tool.poetry.dependencies]
 python = ">=3.9.2,<4.0"
 langchain-core = "^0.3.15"
-lambdadb = "^0.5.11"
+lambdadb = "^0.7.0"
+numpy = "^2.0"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "T201"]
@@ -61,6 +62,7 @@ pytest-asyncio = "^0.23.2"
 pytest-socket = "^0.7.0"
 pytest-watcher = "^0.3.4"
 langchain-tests = "^0.3.5"
+python-dotenv = "^1.0.1"
 
 [tool.poetry.group.codespell.dependencies]
 codespell = "^2.2.6"
