@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 - --version 2.1.4
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          poetry config virtualenvs.create true
+          poetry config virtualenvs.in-project true
+          poetry install --with test,lint,typing --no-interaction
+
+      - name: Ruff check
+        run: poetry run ruff check langchain_lambdadb tests
+
+      - name: Ruff format check
+        run: poetry run ruff format langchain_lambdadb tests --check
+
+      - name: Mypy
+        run: poetry run mypy langchain_lambdadb --cache-dir .mypy_cache
+
+      - name: Unit tests (no network)
+        run: poetry run pytest tests --disable-socket --allow-unix-socket -m "compile" -v

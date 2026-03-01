@@ -23,9 +23,9 @@ Create a collection in LambdaDB with the required indexes:
 from lambdadb import LambdaDB, models
 
 client = LambdaDB(
-    server_url="<your-project-url>",
-    project_api_key="<your-project-api-key>"
-
+    base_url="https://api.lambdadb.ai",
+    project_name="playground",
+    project_api_key="<your-project-api-key>",
 )
 
 # Create collection with vector and text indexes
@@ -54,10 +54,11 @@ from langchain_lambdadb import LambdaDBVectorStore
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
 
-# Set up LambdaDB client
+# Set up LambdaDB client (0.7.0+ use base_url and project_name)
 client = LambdaDB(
-    server_url=os.getenv("LAMBDADB_PROJECT_URL"),
-    project_api_key=os.getenv("LAMBDADB_PROJECT_API_KEY")
+    base_url=os.getenv("LAMBDADB_BASE_URL", "https://api.lambdadb.ai"),
+    project_name=os.getenv("LAMBDADB_PROJECT_NAME", "playground"),
+    project_api_key=os.getenv("LAMBDADB_PROJECT_API_KEY"),
 )
 
 # Connect to existing collection
@@ -86,7 +87,8 @@ for doc in results:
 Set the following environment variables:
 
 ```bash
-export LAMBDADB_PROJECT_URL="<your-project-url>"
+export LAMBDADB_BASE_URL="https://api.lambdadb.ai"   # optional, this is the default
+export LAMBDADB_PROJECT_NAME="playground"             # optional, this is the default
 export LAMBDADB_PROJECT_API_KEY="<your-project-api-key>"
 ```
 
@@ -155,7 +157,8 @@ poetry install --with test,lint
 make test
 
 # Run integration tests with real LambdaDB (requires credentials)
-export LAMBDADB_PROJECT_URL="<your-project-url>"
+export LAMBDADB_BASE_URL="https://api.lambdadb.ai"
+export LAMBDADB_PROJECT_NAME="playground"
 export LAMBDADB_PROJECT_API_KEY="<your-project-api-key>"
 # Optional: Use existing collection instead of creating test collections
 export LAMBDADB_COLLECTION_NAME="your-test-collection"
