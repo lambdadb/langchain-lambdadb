@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Iterable
 from typing import (
@@ -27,12 +28,89 @@ VST = TypeVar("VST", bound=VectorStore)
 # Payload size threshold: use upsert() below this, bulk_upsert_docs() above (LambdaDB)
 UPSERT_PAYLOAD_SIZE_THRESHOLD_BYTES = 1024 * 1024  # 1MB
 
+# Wait for collection ACTIVE after create (seconds)
+_COLLECTION_ACTIVE_WAIT_TIMEOUT = 30
+_COLLECTION_ACTIVE_WAIT_INTERVAL = 1
+
+
+def _default_index_configs(
+    embedding: Embeddings,
+    text_field: str,
+    vector_field: str,
+) -> dict[str, Any]:
+    """Build default index_configs (vector + text only) for create-if-not-exists.
+
+    Metadata fields are not included; only vector and text field are indexed.
+    To filter by metadata, pass custom index_configs when creating the vector store
+    that include those metadata fields (LambdaDB: fields not in indexConfigs
+    cannot be used as filters).
+
+    Args:
+        embedding: Used to get vector dimension via embed_query.
+        text_field: Document text field name (e.g. "text", "page_content").
+        vector_field: Document vector field name (e.g. "vector").
+
+    Returns:
+        Dict suitable for LambdaDB collections.create(index_configs=...).
+    """
+    dimension = len(embedding.embed_query("x"))
+    return {
+        vector_field: {
+            "type": "vector",
+            "dimensions": dimension,
+            "similarity": "cosine",
+        },
+        text_field: {
+            "type": "text",
+            "analyzers": ["english"],
+        },
+    }
+
+
+def _is_collection_not_found_error(exc: BaseException) -> bool:
+    """Return True if the exception indicates the collection does not exist."""
+    try:
+        from lambdadb import errors
+
+        rnf = getattr(errors, "ResourceNotFoundError", None)
+        if rnf is not None and isinstance(exc, rnf):
+            return True
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    return "not found" in msg or "404" in msg
+
+
+def _ensure_collection_active(
+    client: LambdaDB,
+    collection_name: str,
+    timeout_seconds: int = _COLLECTION_ACTIVE_WAIT_TIMEOUT,
+    interval_seconds: float = _COLLECTION_ACTIVE_WAIT_INTERVAL,
+) -> None:
+    """Poll until collection status is ACTIVE or timeout."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            info = client.collections.get(collection_name=collection_name)
+            if info.collection.collection_status.value == "ACTIVE":
+                return
+        except Exception:
+            pass
+        time.sleep(interval_seconds)
+    raise TimeoutError(
+        f"Collection '{collection_name}' did not become ACTIVE within "
+        f"{timeout_seconds}s"
+    )
+
 
 class LambdaDBVectorStore(VectorStore):
     """LambdaDB vector store integration.
 
-    This integration works with existing LambdaDB collections. The collection must be
-    created beforehand with proper vector and text indexes configured.
+    Uses an existing LambdaDB collection or creates one if it does not exist
+    (when create_if_not_exists is True, the default). When creating a collection,
+    index_configs (and optionally partition_config) are used; if index_configs is not
+    provided, a default with vector and text indexes is used. Metadata fields not
+    listed in index_configs cannot be used as filters in LambdaDB.
 
     Setup:
         Install ``langchain-lambdadb`` package.
@@ -65,9 +143,9 @@ class LambdaDBVectorStore(VectorStore):
                 project_api_key="<your_project_api_key>",
             )
 
-            # Use existing collection
+            # Use existing collection or create if missing (default)
             vector_store = LambdaDBVectorStore(
-                collection_name="my_existing_collection",
+                collection_name="my_collection",
                 embedding=OpenAIEmbeddings(),
                 client=client,
             )
@@ -173,29 +251,34 @@ class LambdaDBVectorStore(VectorStore):
         vector_field: str = "vector",
         validate_collection: bool = True,
         default_consistent_read: bool = False,
+        index_configs: Optional[dict[str, Any]] = None,
+        partition_config: Optional[dict[str, Any]] = None,
+        create_if_not_exists: bool = True,
     ) -> None:
         """Initialize with the given embedding function.
 
+        If the collection does not exist and create_if_not_exists is True (default),
+        it will be created using index_configs (or a default vector+text config) and
+        optional partition_config. Metadata fields not present in index_configs cannot
+        be used as filters in LambdaDB.
+
         Args:
             client: LambdaDB client. Documentation: https://docs.lambdadb.ai
-            collection_name: Name of an existing collection in LambdaDB.
-                The collection must already exist and have proper vector indexes
-                configured.
-            embedding: embedding function to use.
+            collection_name: Name of the collection in LambdaDB. Created if missing
+                when create_if_not_exists is True.
+            embedding: Embedding function to use. When creating a collection with
+                default index_configs, dimension is obtained via embed_query (one call).
             text_field: Name of the text field in documents (default: "text").
             vector_field: Name of the vector field in documents (default: "vector").
-            validate_collection: Whether to validate that the collection exists and is
-                active (default: True).
-            default_consistent_read: Default value for consistent_read parameter in all
-                read operations. When True, ensures immediate consistency but may have
-                slight performance impact. When False, uses eventual consistency which
-                is faster but may return stale data for ~1 minute after writes
-                (default: False).
-
-        Note:
-            This integration is designed to work with existing LambdaDB collections.
-            The collection should be created beforehand with appropriate vector and text
-            indexes.
+            validate_collection: When the collection exists, whether to require
+                status ACTIVE (default: True).
+            default_consistent_read: Default for consistent_read in read operations.
+            index_configs: When creating a new collection, index field config.
+                If None and collection is created, a default (vector + text only) is
+                used. Metadata filter fields must be included here if needed.
+            partition_config: Optional partition config when creating a collection.
+            create_if_not_exists: If True and the collection does not exist, create it
+                (default: True). If False, fail with ValueError when missing.
         """
         if client is None or not isinstance(client, LambdaDB):
             raise ValueError(
@@ -214,29 +297,47 @@ class LambdaDBVectorStore(VectorStore):
                 f"collection_name must be a non-empty string, got {collection_name}"
             )
 
-        # Validate that the collection exists and is active
-        if validate_collection:
-            try:
-                collection_info = client.collections.get(
-                    collection_name=collection_name
-                )
-                if collection_info.collection.collection_status.value != "ACTIVE":
+        try:
+            collection_info = client.collections.get(collection_name=collection_name)
+            if collection_info.collection.collection_status.value != "ACTIVE":
+                if validate_collection:
                     raise ValueError(
                         f"Collection '{collection_name}' exists but is not ACTIVE. "
                         f"Status: {collection_info.collection.collection_status.value}"
                     )
-            except Exception as e:
-                raise ValueError(
-                    f"Collection '{collection_name}' does not exist or is not "
-                    f"accessible. "
-                    f"Please create the collection first with proper vector and text "
-                    f"indexes. "
-                    f"Error: {e}"
+        except Exception as e:
+            if _is_collection_not_found_error(e):
+                if not create_if_not_exists:
+                    raise ValueError(
+                        f"Collection '{collection_name}' does not exist. "
+                        f"Create it first with proper vector and text indexes, "
+                        f"or pass index_configs (and optionally partition_config) "
+                        f"with create_if_not_exists=True to create it automatically. "
+                        f"Error: {e}"
+                    ) from e
+                # Create collection
+                configs = index_configs or _default_index_configs(
+                    embedding, text_field, vector_field
                 )
+                create_kw: dict[str, Any] = {
+                    "collection_name": collection_name,
+                    "index_configs": configs,
+                }
+                if partition_config is not None:
+                    create_kw["partition_config"] = partition_config
+                client.collections.create(**create_kw)
+                _ensure_collection_active(client, collection_name)
+            else:
+                if validate_collection:
+                    raise ValueError(
+                        f"Collection '{collection_name}' does not exist or is not "
+                        f"accessible. Create it first or pass index_configs with "
+                        f"create_if_not_exists=True. Error: {e}"
+                    ) from e
+                raise
 
         self._client = client
         self._collection_name = collection_name
-        # Collection-scoped API (0.7.0+): avoids repeating collection_name on every call
         self._coll = client.collection(collection_name)
         self.embedding = embedding
         self._text_field = text_field
@@ -259,28 +360,42 @@ class LambdaDBVectorStore(VectorStore):
     ) -> LambdaDBVectorStore:
         """Create a LambdaDBVectorStore from a list of texts.
 
+        The collection is created if it does not exist (when create_if_not_exists is
+        True), using index_configs and optional partition_config from kwargs.
+
         Args:
             texts: List of texts to add to the vectorstore.
             embedding: Embedding function to use.
             metadatas: Optional list of metadata dicts for each text.
             client: LambdaDB client instance.
-            collection_name: Name of existing collection to use.
+            collection_name: Name of collection to use (created if missing).
             ids: Optional list of IDs for the texts.
-            validate_collection: Whether to validate collection exists and is active.
+            validate_collection: Whether to require collection status ACTIVE when it
+                exists.
             default_consistent_read: Default value for consistent_read parameter.
-            **kwargs: Additional arguments passed to add_texts.
+            **kwargs: Passed to constructor (e.g. text_field, vector_field,
+                index_configs, partition_config, create_if_not_exists) or add_texts.
 
         Returns:
             LambdaDBVectorStore instance with the texts added.
         """
-        store = cls(
-            client=client,
-            collection_name=collection_name,
-            embedding=embedding,
-            validate_collection=validate_collection,
-            default_consistent_read=default_consistent_read,
-            **{k: v for k, v in kwargs.items() if k in ["text_field", "vector_field"]},
-        )
+        init_kwargs: dict[str, Any] = {
+            "client": client,
+            "collection_name": collection_name,
+            "embedding": embedding,
+            "validate_collection": validate_collection,
+            "default_consistent_read": default_consistent_read,
+        }
+        for key in (
+            "text_field",
+            "vector_field",
+            "index_configs",
+            "partition_config",
+            "create_if_not_exists",
+        ):
+            if key in kwargs:
+                init_kwargs[key] = kwargs[key]
+        store = cls(**init_kwargs)
         store.add_texts(texts=texts, metadatas=metadatas, ids=ids, **kwargs)
         return store
 

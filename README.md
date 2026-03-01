@@ -10,14 +10,13 @@ pip install -U langchain-lambdadb
 
 ## Prerequisites
 
-Before using this integration, you need to:
+- LambdaDB credentials (API key). The collection is created automatically if it does not exist (with a default vector and text index), unless you set `create_if_not_exists=False`.
 
-1. Create a collection in LambdaDB with proper vector and text indexes
-2. Have your LambdaDB credentials ready
+To filter by metadata, either create the collection beforehand with `index_configs` that include those metadata fields, or pass `index_configs` (and optionally `partition_config`) when constructing the vector store; in LambdaDB, only fields listed in `index_configs` can be used as filters.
 
-### Creating a Collection
+### Optional: Creating a collection manually
 
-Create a collection in LambdaDB with the required indexes:
+You can create a collection in LambdaDB yourself (e.g. to define custom indexes or partitions):
 
 ```python
 from lambdadb import LambdaDB, models
@@ -28,7 +27,6 @@ client = LambdaDB(
     project_api_key="<your-project-api-key>",
 )
 
-# Create collection with vector and text indexes
 client.collections.create(
     collection_name="my_collection",
     index_configs={
@@ -61,10 +59,10 @@ client = LambdaDB(
     project_api_key=os.getenv("LAMBDADB_PROJECT_API_KEY"),
 )
 
-# Connect to existing collection
+# Uses existing collection or creates it if missing
 vector_store = LambdaDBVectorStore(
     client=client,
-    collection_name="my_collection",  # Must be an existing collection
+    collection_name="my_collection",
     embedding=OpenAIEmbeddings()
 )
 
@@ -120,12 +118,14 @@ for doc, score in results_with_scores:
 
 ### Metadata Filtering
 
+Only metadata fields that are included in the collection's `index_configs` can be used as filters. If you use the default auto-created collection (no custom `index_configs`), add documents and use filters only on fields you passed in `index_configs` when creating the vector store.
+
 ```python
-# Search with metadata filters
+# Search with metadata filters (collection must have index_configs for "source")
 filtered_results = vector_store.similarity_search(
     query="database",
     k=5,
-    filter={"source": "documentation"}
+    filter={"queryString": {"query": "source:documentation"}}
 )
 ```
 
