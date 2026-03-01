@@ -420,14 +420,14 @@ files = [
 
 [[package]]
 name = "lambdadb"
-version = "0.7.0"
+version = "0.7.1"
 description = "The Official LambdaDB Python SDK."
 optional = false
 python-versions = ">=3.9.2"
 groups = ["main"]
 files = [
-    {file = "lambdadb-0.7.0-py3-none-any.whl", hash = "sha256:85e12f8c46d271a5aca9c31c5a9d712f7cbfd31f3e17ed32b5d44d3b52a7ac2f"},
-    {file = "lambdadb-0.7.0.tar.gz", hash = "sha256:98d2df64e041488372d54a3a14745a3c2a447c263b7c43e47dd80d7c29b9243e"},
+    {file = "lambdadb-0.7.1-py3-none-any.whl", hash = "sha256:9bf39a51194be3f17ef2730780057aeb943402390405f772bd63453bb6f44ba2"},
+    {file = "lambdadb-0.7.1.tar.gz", hash = "sha256:e6a86f31a359b27a38f0b903ab7d52888046b878ebced31b8956cbe69266230c"},
 ]
 
 [package.dependencies]
