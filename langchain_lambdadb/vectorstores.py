@@ -247,7 +247,7 @@ class LambdaDBVectorStore(VectorStore):
         client: LambdaDB,
         collection_name: str,
         embedding: Embeddings,
-        text_field: str = "text",
+        text_field: str = "page_content",
         vector_field: str = "vector",
         validate_collection: bool = True,
         default_consistent_read: bool = False,
@@ -268,7 +268,7 @@ class LambdaDBVectorStore(VectorStore):
                 when create_if_not_exists is True.
             embedding: Embedding function to use. When creating a collection with
                 default index_configs, dimension is obtained via embed_query (one call).
-            text_field: Name of the text field in documents (default: "text").
+            text_field: Name of the text field in documents (default: "page_content").
             vector_field: Name of the vector field in documents (default: "vector").
             validate_collection: When the collection exists, whether to require
                 status ACTIVE (default: True).
@@ -355,7 +355,7 @@ class LambdaDBVectorStore(VectorStore):
         collection_name: str,
         ids: Optional[List[str]] = None,
         validate_collection: bool = True,
-        default_consistent_read: bool = True,
+        default_consistent_read: bool = False,
         **kwargs: Any,
     ) -> LambdaDBVectorStore:
         """Create a LambdaDBVectorStore from a list of texts.
@@ -504,7 +504,7 @@ class LambdaDBVectorStore(VectorStore):
                     # Silently ignore missing documents or temporary state issues
                     pass
                 else:
-                    raise (e)
+                    raise
 
     def _to_doc_dict(self, raw: Any) -> dict:
         """Normalize SDK response item to dict (handles Pydantic models)."""
@@ -832,7 +832,7 @@ class LambdaDBVectorStore(VectorStore):
                 ):
                     pass
                 else:
-                    raise e
+                    raise
 
     async def aget_by_ids(
         self, ids: Sequence[str], /, consistent_read: Optional[bool] = None

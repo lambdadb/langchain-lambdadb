@@ -35,13 +35,15 @@ client.collections.create(
             "dimensions": 1536,  # Match your embedding dimensions
             "similarity": models.Similarity.COSINE
         },
-        "text": {
+        "page_content": {
             "type": models.TypeText.TEXT,
             "analyzers": [models.Analyzer.ENGLISH]
         }
     }
 )
 ```
+
+The index name for the text field (e.g. `"page_content"`) must match the `text_field` argument when constructing `LambdaDBVectorStore` (default is `"page_content"`). If you use a different name (e.g. `"text"`), pass it as `text_field=...`.
 
 ## Quick Start
 
